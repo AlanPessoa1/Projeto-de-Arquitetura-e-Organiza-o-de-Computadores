@@ -224,27 +224,27 @@ def decodificar(instrucao_hex):
         nome = None
         assembly = "instrução desconhecida"
 
-    # Campos que a etapa de execução (Entrega 2) precisa para
-    # calcular o efeito da instrução sobre os registradores.
+    # Campos que a etapa de execução precisa para calcular o efeito
+    # da instrução sobre os registradores, a memória e o PC.
     campos = {
         "rs": rs,
         "rt": rt,
         "rd": rd,
         "shamt": shamt,
         "imediato": imediato,
-        "imediato_com_sinal": imediato_com_sinal
+        "imediato_com_sinal": imediato_com_sinal,
+        # Endereço de 26 bits dos saltos j e jal
+        "alvo": instrucao & 0x03FFFFFF
     }
 
     return nome, assembly, campos
 
 
 # ---------------------------------------------------------
-# Estado da CPU: banco de 32 registradores e os registradores
-# especiais PC, HI e LO
+# Constantes e funções auxiliares para valores de 32 bits
 # ---------------------------------------------------------
 
 MASCARA_32_BITS = 0xFFFFFFFF
-
 
 def para_signed32(valor):
     # Reinterpreta um valor de 32 bits sem sinal como um inteiro
@@ -264,6 +264,92 @@ def valor_para_uint32(valor):
     return valor & MASCARA_32_BITS
 
 
+# ---------------------------------------------------------
+# Memória (Entrega 3)
+#
+# A memória é endereçada a byte: cada posição guarda um dado de
+# 8 bits. Ela é armazenada de forma esparsa (dicionário
+# endereço -> byte), então só ocupa espaço o que foi escrito, e
+# endereços nunca escritos valem zero.
+#
+# Assim como no MARS, as words são armazenadas em little-endian:
+# o byte menos significativo fica no menor endereço.
+# ---------------------------------------------------------
+
+# Segmentos de memória com os endereços base usados pelo MARS.
+# Cada um suporta bem mais que as 1024 entradas mínimas exigidas.
+SEGMENTOS = [
+    # nome,   primeiro endereço, último endereço
+    ("text",  0x00400000,        0x0FFFFFFF),  # código (.text)
+    ("data",  0x10000000,        0x1007FFFF),  # .extern, $gp, .data (0x10010000) e heap
+    ("stack", 0x7FFF0000,        0x7FFFFFFF),  # pilha ($sp = 0x7fffeffc)
+]
+
+
+class Memoria:
+    def __init__(self):
+        self.bytes = {}
+
+    def segmento(self, endereco):
+        for nome, inicio, fim in SEGMENTOS:
+            if inicio <= endereco <= fim:
+                return nome
+        return None
+
+    def _gravar_byte(self, endereco, valor):
+        valor &= 0xFF
+        if valor == 0:
+            self.bytes.pop(endereco, None)
+        else:
+            self.bytes[endereco] = valor
+
+    def _juntar_word(self, endereco):
+        valor = 0
+        for i in range(4):
+            valor |= self.bytes.get(endereco + i, 0) << (8 * i)
+        return valor
+
+    # ----- acesso a byte (lb, lbu, sb) -----
+
+    def ler_byte(self, endereco):
+        return self.bytes.get(endereco & MASCARA_32_BITS, 0)
+
+    def escrever_byte(self, endereco, valor):
+        self._gravar_byte(endereco & MASCARA_32_BITS, valor)
+
+    # ----- acesso a word de 4 bytes (lw, sw, busca de instrução) -----
+
+    def ler_word(self, endereco):
+        return self._juntar_word(endereco & MASCARA_32_BITS)
+
+    def escrever_word(self, endereco, valor):
+        endereco &= MASCARA_32_BITS
+        valor &= MASCARA_32_BITS
+        for i in range(4):
+            self._gravar_byte(endereco + i, valor >> (8 * i))
+
+    # ----- instantâneo para o arquivo de saída -----
+
+    def montar_mem(self):
+        # Apresenta a memória de dados (segmentos data e stack) agrupada
+        # em words, em decimal, em ordem crescente de endereço e apenas
+        # com as words diferentes de zero. O segmento text guarda as
+        # próprias instruções do programa e por isso não é listado.
+        enderecos_words = sorted({endereco & ~3 for endereco in self.bytes
+                                  if self.segmento(endereco) != "text"})
+        mem = {}
+        for endereco in enderecos_words:
+            valor = self._juntar_word(endereco)
+            if valor != 0:
+                mem[str(endereco)] = para_signed32(valor)
+        return mem
+
+
+# ---------------------------------------------------------
+# Estado da CPU: banco de 32 registradores, os registradores
+# especiais PC, HI e LO, a memória e a saída padrão (stdout)
+# ---------------------------------------------------------
+
 class EstadoCPU:
     def __init__(self):
         self.registradores = [0] * 32
@@ -277,6 +363,12 @@ class EstadoCPU:
         self.lo = 0
         self.pc = 0x00400000
 
+        self.memoria = Memoria()
+
+        # Texto acumulado da saída do programa (ex.: "overflow"),
+        # assim como o console do MARS.
+        self.stdout = []
+
     def ler(self, indice):
         return self.registradores[indice]
 
@@ -285,27 +377,69 @@ class EstadoCPU:
         if indice != 0:
             self.registradores[indice] = valor & MASCARA_32_BITS
 
-    def aplicar_config(self, config):
-        # Depois da inicialização padrão do MARS, os valores do campo
-        # "config" do arquivo de entrada são aplicados, podendo
-        # sobrescrever $gp, $sp, $pc, hi e lo.
-        for chave, valor in config.items():
+    def aplicar_regs(self, regs):
+        # Depois da inicialização padrão do MARS, os valores de
+        # config.regs são aplicados, podendo sobrescrever $gp, $sp,
+        # pc, hi e lo.
+        for chave, valor in regs.items():
             valor_uint32 = valor_para_uint32(valor)
+            nome = chave.lstrip("$").lower()
 
-            if chave == "pc":
+            if nome == "pc":
                 self.pc = valor_uint32
-            elif chave == "hi":
+            elif nome == "hi":
                 self.hi = valor_uint32
-            elif chave == "lo":
+            elif nome == "lo":
                 self.lo = valor_uint32
             else:
-                indice = int(chave.lstrip("$"))
-                self.escrever(indice, valor_uint32)
+                self.escrever(int(nome), valor_uint32)
+
+    def aplicar_config(self, config):
+        # config.regs: registradores pré-carregados
+        # config.mem: words pré-carregadas na memória
+        self.aplicar_regs(config.get("regs") or {})
+        self.carregar_words(config.get("mem") or {})
+
+    def carregar_words(self, words):
+        # Carrega pares "endereço": valor (config.mem e .data) na
+        # memória antes da execução.
+        for endereco, valor in words.items():
+            self.memoria.escrever_word(valor_para_uint32(endereco), valor_para_uint32(valor))
 
 
 # ---------------------------------------------------------
-# Execução das instruções lógicas e aritméticas (Entrega 2)
+# Execução das instruções
+#   Entrega 2: lógicas e aritméticas
+#   Entrega 3: load, store e desvio
+#
+# Quando executar() é chamada, estado.pc já aponta para a
+# instrução seguinte (PC + 4), que é a base dos desvios.
 # ---------------------------------------------------------
+
+def soma_com_overflow(a, b, estado, destino):
+    # Soma com sinal usada por add, sub e addi. Se o resultado não
+    # couber em 32 bits com sinal, ocorre overflow: assim como no
+    # MIPS, o registrador destino não é alterado, e a ocorrência é
+    # registrada no stdout.
+    resultado = para_signed32(a) + b
+    if resultado < -0x80000000 or resultado > 0x7FFFFFFF:
+        estado.stdout.append("overflow")
+    else:
+        estado.escrever(destino, resultado)
+
+
+def desviar(estado, condicao, deslocamento):
+    # Desvio condicional: o deslocamento é contado em instruções
+    # (words) a partir de PC + 4.
+    if condicao:
+        estado.pc = (estado.pc + (deslocamento << 2)) & MASCARA_32_BITS
+
+
+def saltar(estado, alvo):
+    # j/jal: os 4 bits mais significativos vêm de PC + 4 e os 26 bits
+    # do campo alvo são deslocados 2 posições (endereço de word).
+    estado.pc = (estado.pc & 0xF0000000) | (alvo << 2)
+
 
 def executar(nome, campos, estado):
     rs = estado.ler(campos["rs"])
@@ -315,14 +449,24 @@ def executar(nome, campos, estado):
     shamt = campos["shamt"]
     imediato = campos["imediato"]
     imediato_com_sinal = campos["imediato_com_sinal"]
+    memoria = estado.memoria
 
-    # add/addu e sub/subu resultam no mesmo padrão de bits: a única
-    # diferença entre as versões com e sem sinal é o tratamento de
-    # overflow, que não é exigido nesta etapa.
-    if nome in ("add", "addu"):
+    # Endereço efetivo das instruções de memória: base + offset
+    endereco = (rs + imediato_com_sinal) & MASCARA_32_BITS
+
+    # ----- Entrega 2: lógicas e aritméticas -----
+
+    # add, sub e addi geram exceção de overflow; addu, subu e addiu não.
+    if nome == "add":
+        soma_com_overflow(rs, para_signed32(rt), estado, rd)
+
+    elif nome == "addu":
         estado.escrever(rd, rs + rt)
 
-    elif nome in ("sub", "subu"):
+    elif nome == "sub":
+        soma_com_overflow(rs, -para_signed32(rt), estado, rd)
+
+    elif nome == "subu":
         estado.escrever(rd, rs - rt)
 
     elif nome == "and":
@@ -392,7 +536,10 @@ def executar(nome, campos, estado):
     elif nome == "mflo":
         estado.escrever(rd, estado.lo)
 
-    elif nome in ("addi", "addiu"):
+    elif nome == "addi":
+        soma_com_overflow(rs, imediato_com_sinal, estado, destino_i)
+
+    elif nome == "addiu":
         estado.escrever(destino_i, rs + imediato_com_sinal)
 
     elif nome == "slti":
@@ -407,13 +554,60 @@ def executar(nome, campos, estado):
     elif nome == "xori":
         estado.escrever(destino_i, rs ^ imediato)
 
-    # As demais instruções (acesso à memória, desvios e saltos)
-    # ainda não são executadas nesta etapa, apenas decodificadas.
+    # ----- Entrega 3: load e store -----
+
+    elif nome == "lui":
+        estado.escrever(destino_i, imediato << 16)
+
+    elif nome == "lw":
+        estado.escrever(destino_i, memoria.ler_word(endereco))
+
+    elif nome == "sw":
+        memoria.escrever_word(endereco, rt)
+
+    elif nome == "lb":
+        # Byte com extensão de sinal
+        byte = memoria.ler_byte(endereco)
+        estado.escrever(destino_i, byte - 256 if byte >= 128 else byte)
+
+    elif nome == "lbu":
+        # Byte com extensão de zeros
+        estado.escrever(destino_i, memoria.ler_byte(endereco))
+
+    elif nome == "sb":
+        # Grava apenas os 8 bits menos significativos de rt
+        memoria.escrever_byte(endereco, rt)
+
+    # ----- Entrega 3: desvios condicionais -----
+
+    elif nome == "beq":
+        desviar(estado, rs == rt, imediato_com_sinal)
+
+    elif nome == "bne":
+        desviar(estado, rs != rt, imediato_com_sinal)
+
+    elif nome == "bltz":
+        desviar(estado, para_signed32(rs) < 0, imediato_com_sinal)
+
+    # ----- Entrega 3: saltos -----
+
+    elif nome == "j":
+        saltar(estado, campos["alvo"])
+
+    elif nome == "jal":
+        # Guarda o endereço de retorno (PC + 4) em $ra ($31)
+        estado.escrever(31, estado.pc)
+        saltar(estado, campos["alvo"])
+
+    elif nome == "jr":
+        estado.pc = rs
+
+    # As demais instruções são apenas decodificadas, sem alterar o estado.
 
 
 # ---------------------------------------------------------
 # Montagem do dicionário "regs" com apenas os registradores
-# diferentes de zero, conforme exigido na Entrega 2
+# diferentes de zero, na ordem $0..$31, pc, hi, lo
 # ---------------------------------------------------------
 
 def montar_regs(estado):
@@ -424,64 +618,75 @@ def montar_regs(estado):
         if valor != 0:
             regs[f"${indice}"] = para_signed32(valor)
 
+    if estado.pc != 0:
+        regs["pc"] = estado.pc
+
     if estado.hi != 0:
         regs["hi"] = para_signed32(estado.hi)
 
     if estado.lo != 0:
         regs["lo"] = para_signed32(estado.lo)
 
-    if estado.pc != 0:
-        regs["pc"] = estado.pc
-
     return regs
 
 
 # ---------------------------------------------------------
-# Leitura do arquivo de entrada
+# Simulação completa
 # ---------------------------------------------------------
 
-with open("entrada.json", "r", encoding="utf-8") as arquivo:
-    dados = json.load(arquivo)
+def simular(dados):
+    estado = EstadoCPU()
+
+    # 1) Configuração inicial: registradores, memória e .data
+    estado.aplicar_config(dados.get("config") or {})
+    estado.carregar_words(dados.get("data") or {})
+
+    # 2) Carga do código no segmento de texto, a partir do PC inicial
+    # (0x00400000, como no MARS, a menos que config.regs defina outro)
+    inicio = estado.pc
+    instrucoes = dados.get("text") or []
+    for i, instrucao_hex in enumerate(instrucoes):
+        estado.memoria.escrever_word(inicio + 4 * i, int(instrucao_hex, 16))
+    fim = inicio + 4 * len(instrucoes)
+
+    # 3) Ciclo de busca, decodificação e execução. A próxima instrução
+    # é a apontada pelo PC, então desvios e saltos alteram a ordem de
+    # execução. A simulação termina quando o PC sai do programa (como
+    # no MARS, ao "cair" após a última instrução).
+    saida = []
+
+    while inicio <= estado.pc < fim:
+        palavra = estado.memoria.ler_word(estado.pc)
+        instrucao_hex = f"0x{palavra:08x}"
+        nome, assembly, campos = decodificar(instrucao_hex)
+
+        estado.pc = (estado.pc + 4) & MASCARA_32_BITS
+        executar(nome, campos, estado)
+
+        saida.append({
+            "hex": instrucao_hex,
+            "text": assembly,
+            "regs": montar_regs(estado),
+            "mem": estado.memoria.montar_mem(),
+            "stdout": "\n".join(estado.stdout)
+        })
+
+    return saida
 
 
 # ---------------------------------------------------------
-# Decodificação e execução de todas as instruções presentes
-# em "text", na mesma ordem em que aparecem
+# Programa principal
 # ---------------------------------------------------------
 
-saida = []
-estado = EstadoCPU()
-estado.aplicar_config(dados.get("config", {}))
+if __name__ == "__main__":
+    with open("entrada.json", "r", encoding="utf-8") as arquivo:
+        dados = json.load(arquivo)
 
-for instrucao_hex in dados["text"]:
-    nome, assembly, campos = decodificar(instrucao_hex)
+    saida = simular(dados)
 
-    executar(nome, campos, estado)
-    estado.pc += 4
+    # Exibição da saída no terminal
+    print(json.dumps(saida, indent=4, ensure_ascii=False))
 
-    # O campo mem e o stdout ainda ficam vazios: instruções de
-    # memória e syscalls serão implementadas em etapas posteriores.
-    resultado = {
-        "hex": instrucao_hex,
-        "text": assembly,
-        "regs": montar_regs(estado),
-        "mem": {},
-        "stdout": ""
-    }
-
-    saida.append(resultado)
-
-
-# ---------------------------------------------------------
-# Exibição da saída no terminal
-# ---------------------------------------------------------
-
-print(json.dumps(saida, indent=4, ensure_ascii=False))
-
-
-# ---------------------------------------------------------
-# Criação do arquivo saida.json
-# ---------------------------------------------------------
-
-with open("saida.json", "w", encoding="utf-8") as arquivo:
-    json.dump(saida, arquivo, indent=4, ensure_ascii=False)
+    # Criação do arquivo de saída
+    with open("saida.json", "w", encoding="utf-8") as arquivo:
+        json.dump(saida, arquivo, indent=4, ensure_ascii=False)
