@@ -1,11 +1,11 @@
 import json
 
 
-# ---------------------------------------------------------
-# Tabelas de identificação das instruções
-# ---------------------------------------------------------
 
-# Instruções do tipo R com formato:
+# Tabelas de identificação das instruções
+
+
+# Instruções do tipo R com formato
 # nome $rd, $rs, $rt
 funcoes_r = {
     32: "add",
@@ -35,7 +35,7 @@ funcoes_shift_variavel = {
     7: "srav"
 }
 
-# Multiplicação e divisão:
+# Multiplicação e divisão
 # nome $rs, $rt
 funcoes_mult_div = {
     24: "mult",
@@ -84,9 +84,10 @@ instrucoes_branch_um_reg = {
 }
 
 
-# ---------------------------------------------------------
+
+
 # Função responsável pela decodificação de uma instrução
-# ---------------------------------------------------------
+
 
 def decodificar(instrucao_hex):
     # Converte a instrução hexadecimal para inteiro
@@ -95,9 +96,9 @@ def decodificar(instrucao_hex):
     # Representa a instrução usando exatamente 32 bits
     instrucao_bin = format(instrucao, "032b")
 
-    # -----------------------------------------------------
+    
     # Separação dos campos da instrução MIPS
-    # -----------------------------------------------------
+    
 
     opcode_bin = instrucao_bin[0:6]
     rs_bin = instrucao_bin[6:11]
@@ -110,9 +111,8 @@ def decodificar(instrucao_hex):
     # representam o valor imediato
     imediato_bin = instrucao_bin[16:32]
 
-    # -----------------------------------------------------
+    
     # Conversão dos campos binários para decimal
-    # -----------------------------------------------------
 
     opcode = int(opcode_bin, 2)
     rs = int(rs_bin, 2)
@@ -130,9 +130,8 @@ def decodificar(instrucao_hex):
     if imediato >= 32768:
         imediato_com_sinal = imediato - 65536
 
-    # -----------------------------------------------------
     # Decodificação das instruções do tipo R
-    # -----------------------------------------------------
+    
 
     if opcode == 0:
         if funct in funcoes_r:
@@ -167,9 +166,7 @@ def decodificar(instrucao_hex):
             nome = None
             assembly = "instrução R desconhecida"
 
-    # -----------------------------------------------------
     # Decodificação das instruções do tipo I
-    # -----------------------------------------------------
 
     elif opcode in instrucoes_i:
         nome = instrucoes_i[opcode]
@@ -206,9 +203,8 @@ def decodificar(instrucao_hex):
         nome = "bltz"
         assembly = f"bltz ${rs}, {imediato_com_sinal}"
 
-    # -----------------------------------------------------
+    
     # Decodificação das instruções do tipo J
-    # -----------------------------------------------------
 
     elif opcode == 2:
         nome = "j"
@@ -240,9 +236,9 @@ def decodificar(instrucao_hex):
     return nome, assembly, campos
 
 
-# ---------------------------------------------------------
+
 # Constantes e funções auxiliares para valores de 32 bits
-# ---------------------------------------------------------
+
 
 MASCARA_32_BITS = 0xFFFFFFFF
 
@@ -264,7 +260,7 @@ def valor_para_uint32(valor):
     return valor & MASCARA_32_BITS
 
 
-# ---------------------------------------------------------
+
 # Memória (Entrega 3)
 #
 # A memória é endereçada a byte: cada posição guarda um dado de
@@ -274,7 +270,7 @@ def valor_para_uint32(valor):
 #
 # Assim como no MARS, as words são armazenadas em little-endian:
 # o byte menos significativo fica no menor endereço.
-# ---------------------------------------------------------
+
 
 # Segmentos de memória com os endereços base usados pelo MARS.
 # Cada um suporta bem mais que as 1024 entradas mínimas exigidas.
@@ -309,7 +305,7 @@ class Memoria:
             valor |= self.bytes.get(endereco + i, 0) << (8 * i)
         return valor
 
-    # ----- acesso a byte (lb, lbu, sb) -----
+    # acesso a byte (lb, lbu, sb) 
 
     def ler_byte(self, endereco):
         return self.bytes.get(endereco & MASCARA_32_BITS, 0)
@@ -317,7 +313,7 @@ class Memoria:
     def escrever_byte(self, endereco, valor):
         self._gravar_byte(endereco & MASCARA_32_BITS, valor)
 
-    # ----- acesso a word de 4 bytes (lw, sw, busca de instrução) -----
+    # acesso a word de 4 bytes (lw, sw, busca de instrução):
 
     def ler_word(self, endereco):
         return self._juntar_word(endereco & MASCARA_32_BITS)
@@ -328,7 +324,7 @@ class Memoria:
         for i in range(4):
             self._gravar_byte(endereco + i, valor >> (8 * i))
 
-    # ----- instantâneo para o arquivo de saída -----
+    # instantâneo para o arquivo de saída 
 
     def montar_mem(self):
         # Apresenta a memória de dados (segmentos data e stack) agrupada
@@ -345,10 +341,10 @@ class Memoria:
         return mem
 
 
-# ---------------------------------------------------------
+
 # Estado da CPU: banco de 32 registradores, os registradores
 # especiais PC, HI e LO, a memória e a saída padrão (stdout)
-# ---------------------------------------------------------
+
 
 class EstadoCPU:
     def __init__(self):
@@ -407,14 +403,14 @@ class EstadoCPU:
             self.memoria.escrever_word(valor_para_uint32(endereco), valor_para_uint32(valor))
 
 
-# ---------------------------------------------------------
+
 # Execução das instruções
 #   Entrega 2: lógicas e aritméticas
 #   Entrega 3: load, store e desvio
 #
 # Quando executar() é chamada, estado.pc já aponta para a
 # instrução seguinte (PC + 4), que é a base dos desvios.
-# ---------------------------------------------------------
+
 
 def soma_com_overflow(a, b, estado, destino):
     # Soma com sinal usada por add, sub e addi. Se o resultado não
@@ -454,7 +450,7 @@ def executar(nome, campos, estado):
     # Endereço efetivo das instruções de memória: base + offset
     endereco = (rs + imediato_com_sinal) & MASCARA_32_BITS
 
-    # ----- Entrega 2: lógicas e aritméticas -----
+    # Entrega 2: lógicas e aritméticas 
 
     # add, sub e addi geram exceção de overflow; addu, subu e addiu não.
     if nome == "add":
@@ -554,7 +550,7 @@ def executar(nome, campos, estado):
     elif nome == "xori":
         estado.escrever(destino_i, rs ^ imediato)
 
-    # ----- Entrega 3: load e store -----
+    # Entrega 3: load e store 
 
     elif nome == "lui":
         estado.escrever(destino_i, imediato << 16)
@@ -578,7 +574,7 @@ def executar(nome, campos, estado):
         # Grava apenas os 8 bits menos significativos de rt
         memoria.escrever_byte(endereco, rt)
 
-    # ----- Entrega 3: desvios condicionais -----
+    # Entrega 3: desvios condicionais 
 
     elif nome == "beq":
         desviar(estado, rs == rt, imediato_com_sinal)
@@ -589,7 +585,7 @@ def executar(nome, campos, estado):
     elif nome == "bltz":
         desviar(estado, para_signed32(rs) < 0, imediato_com_sinal)
 
-    # ----- Entrega 3: saltos -----
+    # saltos 
 
     elif nome == "j":
         saltar(estado, campos["alvo"])
@@ -605,10 +601,11 @@ def executar(nome, campos, estado):
     # As demais instruções são apenas decodificadas, sem alterar o estado.
 
 
-# ---------------------------------------------------------
+
+
 # Montagem do dicionário "regs" com apenas os registradores
 # diferentes de zero, na ordem $0..$31, pc, hi, lo
-# ---------------------------------------------------------
+
 
 def montar_regs(estado):
     regs = {}
@@ -630,9 +627,8 @@ def montar_regs(estado):
     return regs
 
 
-# ---------------------------------------------------------
 # Simulação completa
-# ---------------------------------------------------------
+
 
 def simular(dados):
     estado = EstadoCPU()
@@ -674,9 +670,9 @@ def simular(dados):
     return saida
 
 
-# ---------------------------------------------------------
+
 # Programa principal
-# ---------------------------------------------------------
+
 
 if __name__ == "__main__":
     with open("entrada.json", "r", encoding="utf-8") as arquivo:
